@@ -1,12 +1,14 @@
 # archive.py
 import os
 import time
+import struct
 
 CATALOG_FILE = "catalog.txt"
 OUTPUT_FILE = "output.txt"
 LOG_FILE = "log.csv"
 MAX_RECORDS_PER_PAGE = 10
 MAX_PAGES_PER_FILE = 100
+PAGE_HEADER_SIZE = 20  # Size in bytes for page header
 
 class TypeDefinition:
     def __init__(self, name, num_fields, primary_key_index, fields):
@@ -73,6 +75,70 @@ class OutputWriter:
         with open(OUTPUT_FILE, 'a') as f:
             f.write(line + '\n')
 
+class Page:
+    def __init__(self, page_number, record_size, max_records=MAX_RECORDS_PER_PAGE):
+        self.page_number = page_number
+        self.record_size = record_size
+        self.max_records = max_records
+        self.bitmap = [0] * max_records  # 0 = empty, 1 = occupied
+        self.records = [None] * max_records
+        self.num_records = 0
+    
+    def has_space(self):
+        return self.num_records < self.max_records
+    
+    def add_record(self, record):
+        for i in range(self.max_records):
+            if self.bitmap[i] == 0:
+                self.bitmap[i] = 1
+                self.records[i] = record
+                self.num_records += 1
+                return i
+        return -1  # No space available
+    
+    def get_record(self, slot_index):
+        if 0 <= slot_index < self.max_records and self.bitmap[slot_index] == 1:
+            return self.records[slot_index]
+        return None
+    
+    def delete_record(self, slot_index):
+        if 0 <= slot_index < self.max_records and self.bitmap[slot_index] == 1:
+            self.bitmap[slot_index] = 0
+            self.records[slot_index] = None
+            self.num_records -= 1
+            return True
+        return False
+    
+    def serialize(self):
+        # Format: page_number|num_records|bitmap|records
+        header = f"{self.page_number}|{self.num_records}|{''.join(map(str, self.bitmap))}|"
+        content = ''
+        for record in self.records:
+            if record:
+                content += record
+            else:
+                content += '0' * self.record_size  # Empty record placeholder
+        return header + content
+    
+    @staticmethod
+    def deserialize(page_str, record_size):
+        parts = page_str.split('|', 3)
+        page_number = int(parts[0])
+        num_records = int(parts[1])
+        bitmap = [int(b) for b in parts[2]]
+        
+        page = Page(page_number, record_size)
+        page.bitmap = bitmap
+        page.num_records = num_records
+        
+        content = parts[3]
+        for i in range(len(bitmap)):
+            if bitmap[i] == 1:
+                start = i * record_size
+                page.records[i] = content[start:start+record_size]
+        
+        return page
+
 class RecordManager:
     def __init__(self, td: TypeDefinition):
         self.td = td
@@ -102,53 +168,162 @@ class RecordManager:
 
     def get_primary_key(self, values):
         return values[self.td.primary_key_index]
+    
+    def read_page(self, file, page_number):
+        # Reset file pointer to beginning
+        file.seek(0)
+        current_page = 0
+        
+        while True:
+            line = file.readline().strip()
+            if not line:
+                return None  # Page not found
+            
+            # Check if this is the page we're looking for
+            if int(line.split('|')[0]) == page_number:
+                return line
+            
+            current_page += 1
+    
+    def write_page(self, page):
+        # Read all pages
+        pages = []
+        if os.path.exists(self.file_path):
+            with open(self.file_path, 'r') as f:
+                for line in f:
+                    if line.strip():
+                        pages.append(line.strip())
+        
+        # Replace or append the page
+        page_found = False
+        for i, p in enumerate(pages):
+            if int(p.split('|')[0]) == page.page_number:
+                pages[i] = page.serialize()
+                page_found = True
+                break
+        
+        if not page_found:
+            pages.append(page.serialize())
+        
+        # Write all pages back
+        with open(self.file_path, 'w') as f:
+            for p in pages:
+                f.write(p + '\n')
 
     def record_exists(self, pk):
         if not os.path.exists(self.file_path):
             return False
+            
         with open(self.file_path, 'r') as f:
-            for line in f:
-                if line.startswith('1'):
-                    if self.get_primary_key(self.parse_record(line.strip())) == pk:
-                        return True
+            page_number = 0
+            while True:
+                page_str = self.read_page(f, page_number)
+                if not page_str:
+                    break
+                    
+                page = Page.deserialize(page_str, self.td.record_size)
+                
+                # Check each record in the page
+                for i in range(page.max_records):
+                    if page.bitmap[i] == 1:
+                        record = page.records[i]
+                        parsed = self.parse_record(record)
+                        if parsed and self.get_primary_key(parsed) == pk:
+                            return True
+                            
+                page_number += 1
+                
         return False
 
     def create_record(self, values):
         pk = self.get_primary_key(values)
         if self.record_exists(pk):
             return False
+            
         record = self.format_record(values)
-        with open(self.file_path, 'a') as f:
-            f.write(record + '\n')
+        
+        # Find a page with space or create a new one
+        page_found = False
+        page_number = 0
+        
+        if os.path.exists(self.file_path):
+            with open(self.file_path, 'r') as f:
+                while page_number < MAX_PAGES_PER_FILE:
+                    page_str = self.read_page(f, page_number)
+                    if not page_str:
+                        # Create a new page
+                        break
+                        
+                    page = Page.deserialize(page_str, self.td.record_size)
+                    if page.has_space():
+                        page.add_record(record)
+                        page_found = True
+                        self.write_page(page)
+                        break
+                        
+                    page_number += 1
+        
+        if not page_found:
+            # Create a new page
+            page = Page(page_number, self.td.record_size)
+            page.add_record(record)
+            with open(self.file_path, 'a' if os.path.exists(self.file_path) else 'w') as f:
+                f.write(page.serialize() + '\n')
+                
         return True
 
     def delete_record(self, pk):
         if not os.path.exists(self.file_path):
             return False
+            
         updated = False
-        lines = []
+        
         with open(self.file_path, 'r') as f:
-            for line in f:
-                if line.startswith('1') and self.get_primary_key(self.parse_record(line.strip())) == pk:
-                    lines.append('0' + line[1:])
-                    updated = True
-                else:
-                    lines.append(line.rstrip())
-        if updated:
-            with open(self.file_path, 'w') as f:
-                for l in lines:
-                    f.write(l + '\n')
-        return updated
+            page_number = 0
+            while True:
+                page_str = self.read_page(f, page_number)
+                if not page_str:
+                    break
+                    
+                page = Page.deserialize(page_str, self.td.record_size)
+                
+                # Check each record in the page
+                for i in range(page.max_records):
+                    if page.bitmap[i] == 1:
+                        record = page.records[i]
+                        parsed = self.parse_record(record)
+                        if parsed and self.get_primary_key(parsed) == pk:
+                            page.delete_record(i)
+                            self.write_page(page)
+                            return True
+                            
+                page_number += 1
+                
+        return False
 
     def search_record(self, pk):
         if not os.path.exists(self.file_path):
             return None
+            
         with open(self.file_path, 'r') as f:
-            for line in f:
-                if line.startswith('1'):
-                    parsed = self.parse_record(line.strip())
-                    if self.get_primary_key(parsed) == pk:
-                        return parsed
+            page_number = 0
+            while True:
+                page_str = self.read_page(f, page_number)
+                if not page_str:
+                    break
+                    
+                page = Page.deserialize(page_str, self.td.record_size)
+                
+                # Check each record in the page
+                for i in range(page.max_records):
+                    if page.bitmap[i] == 1:
+                        record = page.records[i]
+                        parsed = self.parse_record(record)
+                        if parsed and self.get_primary_key(parsed) == pk:
+                            return parsed
+                            
+                page_number += 1
+                
         return None
 
 if __name__ == '__main__':
@@ -174,6 +349,7 @@ if __name__ == '__main__':
                     for i in range(num_fields):
                         fname = parts[5 + i * 2]
                         ftype = parts[6 + i * 2]
+                        # Adjust field sizes based on type
                         fsize = 4 if ftype == 'int' else 12  # default str size
                         fields.append((fname, ftype, fsize))
                     if catalog.has_type(type_name):
@@ -181,7 +357,7 @@ if __name__ == '__main__':
                     else:
                         td = TypeDefinition(type_name, num_fields, pk_index, fields)
                         catalog.save_type(td)
-                        open(f"{type_name}.txt", 'w').close()
+                        # No need to create empty file, it will be created when first record is added
                         logger.log(line, 'success')
 
                 elif command == 'create' and parts[1] == 'record':
