@@ -1,14 +1,13 @@
 # archive.py
 import os
 import time
-import struct
 
 CATALOG_FILE = "catalog.txt"
 OUTPUT_FILE = "output.txt"
 LOG_FILE = "log.csv"
 MAX_RECORDS_PER_PAGE = 10
 MAX_PAGES_PER_FILE = 100
-PAGE_HEADER_SIZE = 20  # Size in bytes for page header
+FIELD_SIZE = 25  # Fixed size for all fields (int or str)
 
 class TypeDefinition:
     def __init__(self, name, num_fields, primary_key_index, fields):
@@ -16,10 +15,10 @@ class TypeDefinition:
         self.num_fields = num_fields
         self.primary_key_index = primary_key_index
         self.fields = fields  # List of (name, type, size)
-        self.record_size = 1 + sum(size for _, _, size in fields)  # 1 byte for validity
+        self.record_size = 1 + sum(FIELD_SIZE for _ in fields)
 
     def to_line(self):
-        field_str = '|'.join([f"{fname}:{ftype}:{fsize}" for fname, ftype, fsize in self.fields])
+        field_str = '|'.join([f"{fname}:{ftype}:{FIELD_SIZE}" for fname, ftype, _ in self.fields])
         return f"{self.name}|{self.num_fields}|{self.primary_key_index}|{field_str}"
 
     @staticmethod
@@ -83,10 +82,10 @@ class Page:
         self.bitmap = [0] * max_records  # 0 = empty, 1 = occupied
         self.records = [None] * max_records
         self.num_records = 0
-    
+
     def has_space(self):
         return self.num_records < self.max_records
-    
+
     def add_record(self, record):
         for i in range(self.max_records):
             if self.bitmap[i] == 0:
@@ -94,13 +93,13 @@ class Page:
                 self.records[i] = record
                 self.num_records += 1
                 return i
-        return -1  # No space available
-    
+        return -1
+
     def get_record(self, slot_index):
         if 0 <= slot_index < self.max_records and self.bitmap[slot_index] == 1:
             return self.records[slot_index]
         return None
-    
+
     def delete_record(self, slot_index):
         if 0 <= slot_index < self.max_records and self.bitmap[slot_index] == 1:
             self.bitmap[slot_index] = 0
@@ -108,9 +107,8 @@ class Page:
             self.num_records -= 1
             return True
         return False
-    
+
     def serialize(self):
-        # Format: page_number|num_records|bitmap|records
         header = f"{self.page_number}|{self.num_records}|{''.join(map(str, self.bitmap))}|"
         content = ''
         for record in self.records:
@@ -119,24 +117,21 @@ class Page:
             else:
                 content += '0' * self.record_size  # Empty record placeholder
         return header + content
-    
+
     @staticmethod
     def deserialize(page_str, record_size):
         parts = page_str.split('|', 3)
         page_number = int(parts[0])
         num_records = int(parts[1])
         bitmap = [int(b) for b in parts[2]]
-        
         page = Page(page_number, record_size)
         page.bitmap = bitmap
         page.num_records = num_records
-        
         content = parts[3]
         for i in range(len(bitmap)):
             if bitmap[i] == 1:
                 start = i * record_size
                 page.records[i] = content[start:start+record_size]
-        
         return page
 
 class RecordManager:
@@ -145,11 +140,11 @@ class RecordManager:
         self.file_path = f"{td.name}.txt"
 
     def format_record(self, values):
-        record = '1'  # Validity flag as char
-        for (value, (_, ftype, fsize)) in zip(values, self.td.fields):
+        record = '1'  # Validity flag
+        for (value, (_, ftype, _)) in zip(values, self.td.fields):
             if ftype == 'int':
                 value = str(int(value))
-            record += value.ljust(fsize)
+            record += value.ljust(FIELD_SIZE)
         return record
 
     def parse_record(self, record_str):
@@ -157,55 +152,37 @@ class RecordManager:
             return None
         offset = 1
         values = []
-        for _, ftype, fsize in self.td.fields:
-            field = record_str[offset:offset+fsize].strip()
-            if ftype == 'int':
-                values.append(str(int(field)))
-            else:
-                values.append(field)
-            offset += fsize
+        for _, ftype, _ in self.td.fields:
+            field = record_str[offset:offset+FIELD_SIZE].strip()
+            values.append(field)
+            offset += FIELD_SIZE
         return values
 
     def get_primary_key(self, values):
         return values[self.td.primary_key_index]
-    
+
     def read_page(self, file, page_number):
-        # Reset file pointer to beginning
         file.seek(0)
-        current_page = 0
-        
         while True:
             line = file.readline().strip()
             if not line:
-                return None  # Page not found
-            
-            # Check if this is the page we're looking for
+                return None
             if int(line.split('|')[0]) == page_number:
                 return line
-            
-            current_page += 1
-    
+
     def write_page(self, page):
-        # Read all pages
         pages = []
         if os.path.exists(self.file_path):
             with open(self.file_path, 'r') as f:
                 for line in f:
                     if line.strip():
                         pages.append(line.strip())
-        
-        # Replace or append the page
-        page_found = False
         for i, p in enumerate(pages):
             if int(p.split('|')[0]) == page.page_number:
                 pages[i] = page.serialize()
-                page_found = True
                 break
-        
-        if not page_found:
+        else:
             pages.append(page.serialize())
-        
-        # Write all pages back
         with open(self.file_path, 'w') as f:
             for p in pages:
                 f.write(p + '\n')
@@ -213,81 +190,57 @@ class RecordManager:
     def record_exists(self, pk):
         if not os.path.exists(self.file_path):
             return False
-            
         with open(self.file_path, 'r') as f:
             page_number = 0
             while True:
                 page_str = self.read_page(f, page_number)
                 if not page_str:
                     break
-                    
                 page = Page.deserialize(page_str, self.td.record_size)
-                
-                # Check each record in the page
                 for i in range(page.max_records):
                     if page.bitmap[i] == 1:
                         record = page.records[i]
                         parsed = self.parse_record(record)
                         if parsed and self.get_primary_key(parsed) == pk:
                             return True
-                            
                 page_number += 1
-                
         return False
 
     def create_record(self, values):
         pk = self.get_primary_key(values)
         if self.record_exists(pk):
             return False
-            
         record = self.format_record(values)
-        
-        # Find a page with space or create a new one
         page_found = False
         page_number = 0
-        
         if os.path.exists(self.file_path):
             with open(self.file_path, 'r') as f:
                 while page_number < MAX_PAGES_PER_FILE:
                     page_str = self.read_page(f, page_number)
                     if not page_str:
-                        # Create a new page
                         break
-                        
                     page = Page.deserialize(page_str, self.td.record_size)
                     if page.has_space():
                         page.add_record(record)
-                        page_found = True
                         self.write_page(page)
-                        break
-                        
+                        return True
                     page_number += 1
-        
-        if not page_found:
-            # Create a new page
-            page = Page(page_number, self.td.record_size)
-            page.add_record(record)
-            with open(self.file_path, 'a' if os.path.exists(self.file_path) else 'w') as f:
-                f.write(page.serialize() + '\n')
-                
+        page = Page(page_number, self.td.record_size)
+        page.add_record(record)
+        with open(self.file_path, 'a' if os.path.exists(self.file_path) else 'w') as f:
+            f.write(page.serialize() + '\n')
         return True
 
     def delete_record(self, pk):
         if not os.path.exists(self.file_path):
             return False
-            
-        updated = False
-        
         with open(self.file_path, 'r') as f:
             page_number = 0
             while True:
                 page_str = self.read_page(f, page_number)
                 if not page_str:
                     break
-                    
                 page = Page.deserialize(page_str, self.td.record_size)
-                
-                # Check each record in the page
                 for i in range(page.max_records):
                     if page.bitmap[i] == 1:
                         record = page.records[i]
@@ -296,34 +249,26 @@ class RecordManager:
                             page.delete_record(i)
                             self.write_page(page)
                             return True
-                            
                 page_number += 1
-                
         return False
 
     def search_record(self, pk):
         if not os.path.exists(self.file_path):
             return None
-            
         with open(self.file_path, 'r') as f:
             page_number = 0
             while True:
                 page_str = self.read_page(f, page_number)
                 if not page_str:
                     break
-                    
                 page = Page.deserialize(page_str, self.td.record_size)
-                
-                # Check each record in the page
                 for i in range(page.max_records):
                     if page.bitmap[i] == 1:
                         record = page.records[i]
                         parsed = self.parse_record(record)
                         if parsed and self.get_primary_key(parsed) == pk:
                             return parsed
-                            
                 page_number += 1
-                
         return None
 
 if __name__ == '__main__':
@@ -332,7 +277,6 @@ if __name__ == '__main__':
     catalog = Catalog()
     logger = Logger()
     output = OutputWriter()
-
     with open(input_file, 'r') as f:
         for line in f:
             line = line.strip()
@@ -349,17 +293,13 @@ if __name__ == '__main__':
                     for i in range(num_fields):
                         fname = parts[5 + i * 2]
                         ftype = parts[6 + i * 2]
-                        # Adjust field sizes based on type
-                        fsize = 4 if ftype == 'int' else 12  # default str size
-                        fields.append((fname, ftype, fsize))
+                        fields.append((fname, ftype, FIELD_SIZE))
                     if catalog.has_type(type_name):
                         logger.log(line, 'failure')
                     else:
                         td = TypeDefinition(type_name, num_fields, pk_index, fields)
                         catalog.save_type(td)
-                        # No need to create empty file, it will be created when first record is added
                         logger.log(line, 'success')
-
                 elif command == 'create' and parts[1] == 'record':
                     type_name = parts[2]
                     values = parts[3:]
@@ -372,7 +312,6 @@ if __name__ == '__main__':
                         logger.log(line, 'success')
                     else:
                         logger.log(line, 'failure')
-
                 elif command == 'delete' and parts[1] == 'record':
                     type_name = parts[2]
                     pk = parts[3]
@@ -385,7 +324,6 @@ if __name__ == '__main__':
                         logger.log(line, 'success')
                     else:
                         logger.log(line, 'failure')
-
                 elif command == 'search' and parts[1] == 'record':
                     type_name = parts[2]
                     pk = parts[3]
@@ -402,5 +340,5 @@ if __name__ == '__main__':
                         logger.log(line, 'failure')
                 else:
                     logger.log(line, 'failure')
-            except Exception as e:
+            except Exception:
                 logger.log(line, 'failure')
