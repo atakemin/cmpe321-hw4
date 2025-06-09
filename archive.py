@@ -143,6 +143,8 @@ class RecordManager:
         record = '1'  # Validity flag
         for (value, (_, ftype, _)) in zip(values, self.td.fields):
             if ftype == 'int':
+                if not value.lstrip('-').isdigit():
+                    raise ValueError(f"Invalid integer value: {value}")
                 value = str(int(value))
             record += value.ljust(FIELD_SIZE)
         return record
