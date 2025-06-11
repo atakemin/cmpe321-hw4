@@ -1,0 +1,135 @@
+\documentclass{article}
+\usepackage{graphicx} % Required for inserting images
+\usepackage{listings} % For code snippets
+
+\title{CmpE 321 Project 4 Report}
+\author{Dağhan Erdönmez}
+\date{June 2025}
+
+\begin{document}
+
+\maketitle
+
+\section{Introduction}
+This report explains my implementation of the Dune Archive System. This system is designed to store data about the planet Arrakis, including information about noble Houses, Fremen tribes, and other critical elements. The system follows the principles of a simple DBMS with files, pages, and records.
+
+\section{Design}
+
+This section explains how the main design requirements were implemented. I focus on the technical decisions and how they are realized in the code.
+
+\subsection{Page Size and File Size}
+Each page can store up to 10 records, as specified by the constant \texttt{MAX\_RECORDS\_PER\_PAGE = 10}. Each data file (one per type) can have up to 100 pages (\texttt{MAX\_PAGES\_PER\_FILE = 100}). These values are set at the top of \texttt{archive.py} and used throughout the code, especially in the \texttt{Page} and \texttt{RecordManager} classes.
+
+\subsection{Page and Record Organization}
+Pages follow an unpacked slotted page format. In the \texttt{Page} class, each page has:
+\begin{itemize}
+    \item A header with the page number, number of records, and a bitmap (list of 10 values, 0 or 1) showing which slots are occupied.
+    \item An array of up to 10 record slots. Each slot can be empty or hold a fixed-length record.
+\end{itemize}
+The bitmap is implemented as a list (\texttt{self.bitmap}) and is serialized/deserialized with the page. When a record is deleted, its slot in the bitmap is set to 0, but the slot remains in the page.
+
+Each record has a fixed length. The size for each field is 25 characters (\texttt{FIELD\_SIZE = 25}), and records start with a validity flag ('1' for valid, '0' for invalid). The \texttt{format\_record} and \texttt{parse\_record} methods in \texttt{RecordManager} handle the conversion between values and their fixed-length string representation.
+
+\subsection{System Catalog and Field Definitions}
+All type definitions are stored in a catalog file (\texttt{catalog.txt}). The \texttt{TypeDefinition} class holds the type name, number of fields, primary key index, and a list of fields (each field has a name, type, and size). The field sizes are always 25, but the catalog still stores this information for each field. The \texttt{Catalog} class loads and saves type definitions to the catalog file.
+
+\subsection{Page and Record Headers}
+Page headers include the page number, number of records, and the bitmap. These are serialized as part of the page string (see \texttt{Page.serialize()}). Record headers are just a single character at the start of each record for validity.
+
+\subsection{Field and Type Name Lengths, Field Count}
+The code assumes that field names and type names will fit in the input, but does not enforce a strict length limit in code. However, since each field value is stored in a 25-character slot, field names and type names should be less than or equal to 25 characters to fit.
+
+The system allows any number of fields per type, but the project requires at least 6. This is checked when creating a type. The field definitions are stored as part of the type in the catalog.
+
+\subsection{Summary}
+In summary, the implementation matches the required design points:
+\begin{itemize}
+    \item Pages have a maximum of 10 records, and files have a maximum of 100 pages.
+    \item Pages use a slotted format with a bitmap to track used slots.
+    \item Records are fixed-length, with field sizes set to 25 characters.
+    \item All type and field definitions are kept in a catalog file.
+    \item Page and record headers are included as required.
+    \item Field and type names are handled as strings up to 25 characters.
+\end{itemize}
+
+\section{Implementation}
+
+\subsection{Main Components}
+
+\subsubsection{TypeDefinition Class}
+This class handles the definition of types (tables). It stores the name, number of fields, primary key index, and field information. It also has methods to convert between the object representation and the string representation stored in the catalog file.
+
+\subsubsection{Catalog Class}
+The Catalog maintains a list of all defined types. It loads type definitions from the catalog file during startup and provides methods to add new types and check if types exist.
+
+\subsubsection{Page Class}
+The Page class represents a page in a file. It handles the storage and retrieval of records, manages the bitmap that shows which slots are occupied, and provides methods for adding, getting, and deleting records.
+
+\subsubsection{RecordManager Class}
+This is the main class for record operations. For each type, a RecordManager is created that knows how to:
+\begin{itemize}
+    \item Format records for storage
+    \item Parse stored records back into field values
+    \item Create new records
+    \item Delete existing records
+    \item Search for records by primary key
+\end{itemize}
+
+\subsubsection{Logger and OutputWriter Classes}
+These utility classes handle logging operations to the log file and writing output to the output file.
+
+\subsection{File Handling}
+Files are only loaded into memory one page at a time. This makes the system efficient even with large data files. When performing operations like search or delete, the system reads pages one by one until it finds the matching record.
+
+\subsection{Supported Operations}
+
+\subsubsection{Create Type}
+This operation creates a new type (table) with a name, fields, and a primary key. The system checks if a type with the same name already exists. If not, it creates the type and saves it to the catalog.
+
+\subsubsection{Create Record}
+This operation adds a new record to a type. The system checks if the type exists and if a record with the same primary key already exists. If not, it finds a page with available space and adds the record there.
+
+\subsubsection{Delete Record}
+This operation removes a record from a type. The system searches for a record with the matching primary key and removes it if found. It updates the bitmap in the page to mark the slot as empty.
+
+\subsubsection{Search Record}
+This operation finds a record by its primary key. The system searches through pages until it finds a record with the matching primary key. If found, the record is returned and written to the output file.
+
+\section{Error Handling}
+
+The system logs all operations with their status (success or failure). Operations fail in these cases:
+\begin{itemize}
+    \item Creating a type with a name that already exists
+    \item Creating a record with a primary key that already exists
+    \item Deleting or searching for a record that doesn't exist
+    \item Operating on a type that doesn't exist
+\end{itemize}
+
+When an operation fails, the system logs the failure but continues operating without crashing.
+
+\section{Limitations and Future Improvements}
+
+My implementation has some limitations:
+\begin{itemize}
+    \item It only supports string and integer field types
+    \item All fields have a fixed size of 25 characters
+    \item The system doesn't support updating records - you need to delete and recreate them
+    \item There's no security or user management
+\end{itemize}
+
+In the future, I could improve the system by adding:
+\begin{itemize}
+    \item Support for variable-length fields
+    \item More data types (like float, boolean, date)
+    \item An update operation
+    \item Indexes for faster searching
+    \item A simple query language
+\end{itemize}
+
+\section{Conclusion}
+
+The Dune Archive System provides a simple but functional way to store and retrieve data about Arrakis. By following database principles like file, page, and record organization, the system is able to efficiently handle the four main operations: create type, create record, delete record, and search record.
+
+The design choices I made, like using fixed-length fields and slotted pages, help keep the implementation simple while still being effective. The system successfully meets all the requirements specified in the project description.
+
+\end{document}
